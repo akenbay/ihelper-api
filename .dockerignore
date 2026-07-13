@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.venv
+venv
+__pycache__
+*.pyc
+*.sqlite3
+staticfiles
+README.md
+.DS_Store
