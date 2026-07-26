@@ -15,6 +15,7 @@ from core.models import (
     Group,
     Journal,
     LessonReport,
+    Material,
     Role,
     ScheduleEntry,
     Student,
@@ -447,6 +448,27 @@ class PasswordResetTests(BaseFixture):
         self.assertEqual(unknown.status_code, status.HTTP_200_OK)
         self.assertEqual(known.data, unknown.data)
 
+    def test_confirm_accepts_token_only_and_sets_password(self):
+        # Фронт присылает только {token, password}, без uid.
+        token = services.make_password_reset_token(self.coordinator)
+        response = self.client.post(
+            reverse("password_reset_confirm"),
+            {"token": token, "password": "BrandNew!2026"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.coordinator.refresh_from_db()
+        self.assertTrue(self.coordinator.check_password("BrandNew!2026"))
+
+    def test_confirm_rejects_bad_token(self):
+        response = self.client.post(
+            reverse("password_reset_confirm"),
+            {"token": "garbage.token", "password": "BrandNew!2026"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 class AuthTests(BaseFixture):
     def test_login_returns_tokens_and_role(self):
@@ -460,3 +482,86 @@ class AuthTests(BaseFixture):
         self.assertIn("access", response.data)
         self.assertIn("refresh", response.data)
         self.assertEqual(response.data["user"]["role"], Role.TUTOR)
+
+    def test_login_accepts_email_and_username_in_both_keys(self):
+        user = make_user("emailtutor", Role.TUTOR, email="tutor.by.email@ihelper.kz")
+
+        # Фронт кладёт одно и то же значение (тут — email) в оба ключа.
+        response = self.client.post(
+            reverse("login"),
+            {
+                "username": "tutor.by.email@ihelper.kz",
+                "email": "tutor.by.email@ihelper.kz",
+                "password": "StrongPass!2024",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(response.data["user"]["id"], user.id)
+
+    def test_me_returns_lowercase_role(self):
+        self.auth(self.tutor)
+        response = self.client.get(reverse("me"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        for key in ("id", "full_name", "role", "email"):
+            self.assertIn(key, response.data)
+        self.assertEqual(response.data["role"], "tutor")
+
+    def test_superuser_without_role_reports_admin(self):
+        root = User.objects.create(username="root", is_superuser=True, is_staff=True, role="")
+        root.set_password("StrongPass!2024")
+        root.save()
+
+        self.auth(root)
+        response = self.client.get(reverse("me"))
+        self.assertEqual(response.data["role"], "admin")
+
+
+class MaterialTests(BaseFixture):
+    def setUp(self):
+        super().setUp()
+        self.material = Material.objects.create(
+            title="Сборник задач по алгебре",
+            subject=self.math,
+            grade="5",
+            link="https://materials.ihelper.kz/math/5/tasks.pdf",
+            description="Задачи для отработки.",
+        )
+
+    def test_tutor_can_read_materials_with_link_field(self):
+        self.auth(self.tutor)
+        response = self.client.get(reverse("material-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        row = response.data["results"][0]
+        self.assertIn("link", row)
+        self.assertEqual(row["link"], "https://materials.ihelper.kz/math/5/tasks.pdf")
+
+    def test_materials_filterable_by_grade_and_subject(self):
+        Material.objects.create(title="Английский, 6 класс", subject=self.english, grade="6")
+        self.auth(self.tutor)
+
+        response = self.client.get(reverse("material-list"), {"grade": "5", "subject": self.math.id})
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["title"], "Сборник задач по алгебре")
+
+    def test_coordinator_can_create_material(self):
+        self.auth(self.coordinator)
+        response = self.client.post(
+            reverse("material-list"),
+            {"title": "Новый материал", "subject": self.math.id, "grade": "5",
+             "link": "https://materials.ihelper.kz/x.pdf"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+    def test_tutor_cannot_create_material(self):
+        self.auth(self.tutor)
+        response = self.client.post(
+            reverse("material-list"),
+            {"title": "Запрещено", "subject": self.math.id, "grade": "5"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

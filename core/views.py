@@ -10,10 +10,8 @@ ORG-SCOPE: когда появится вторая организация (СД
 в каждый get_queryset() ниже.
 """
 
-from django.contrib.auth.tokens import default_token_generator
+from django.conf import settings
 from django.db.models import Prefetch, Q
-from django.utils.encoding import force_bytes, force_str
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -101,11 +99,8 @@ class PasswordResetRequestView(APIView):
 
         user = User.objects.filter(email__iexact=email, is_active=True).first()
         if user is not None:
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            token = default_token_generator.make_token(user)
-            from django.conf import settings
-
-            link = f"{settings.FRONTEND_URL}/reset-password/{uid}/{token}"
+            token = services.make_password_reset_token(user)
+            link = f"{settings.FRONTEND_URL}/reset-password/{token}"
             send_password_reset_email(email=user.email, link=link)
 
         return Response(
@@ -124,13 +119,8 @@ class PasswordResetConfirmView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        try:
-            uid = force_str(urlsafe_base64_decode(data["uid"]))
-            user = User.objects.get(pk=uid)
-        except (User.DoesNotExist, ValueError, TypeError, OverflowError):
-            user = None
-
-        if user is None or not default_token_generator.check_token(user, data["token"]):
+        user = services.parse_password_reset_token(data["token"])
+        if user is None:
             return Response(
                 {"detail": "Ссылка недействительна или устарела."},
                 status=status.HTTP_400_BAD_REQUEST,

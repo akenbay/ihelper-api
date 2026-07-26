@@ -7,8 +7,11 @@ import hashlib
 import secrets
 
 from django.conf import settings
+from django.contrib.auth.tokens import default_token_generator
 from django.db import transaction
 from django.utils import timezone
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 
 from .emails import send_parent_invite_email
 from .models import Journal, ParentInvite, Role, User
@@ -153,3 +156,31 @@ def accept_parent_invite(raw_token: str, password: str, full_name: str = ""):
     invite.accepted_at = timezone.now()
     invite.save(update_fields=["accepted_at"])
     return parent
+
+
+# --- Сброс пароля -------------------------------------------------------
+# Токен самодостаточный: uid и подпись Django упакованы в одну строку "uid.token",
+# поэтому фронту достаточно прислать только token (без отдельного uid). Ничего в
+# БД не храним — используется штатный default_token_generator (одноразовый, с TTL
+# через PASSWORD_RESET_TIMEOUT).
+
+
+def make_password_reset_token(user) -> str:
+    uid = urlsafe_base64_encode(force_bytes(user.pk))
+    token = default_token_generator.make_token(user)
+    return f"{uid}.{token}"
+
+
+def parse_password_reset_token(raw_token: str):
+    """Возвращает пользователя по валидному токену сброса, иначе None."""
+    if not raw_token or "." not in raw_token:
+        return None
+    uid_b64, _, token = raw_token.partition(".")
+    try:
+        uid = force_str(urlsafe_base64_decode(uid_b64))
+        user = User.objects.get(pk=uid)
+    except (User.DoesNotExist, ValueError, TypeError, OverflowError):
+        return None
+    if not default_token_generator.check_token(user, token):
+        return None
+    return user

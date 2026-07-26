@@ -91,6 +91,17 @@ class User(AbstractUser):
         return self.full_name or self.username
 
     @property
+    def effective_role(self):
+        """Роль строго в нижнем регистре: "admin" | "coordinator" | "tutor" | "parent".
+
+        Суперпользователь, заведённый через createsuperuser, имеет пустое поле role —
+        для фронта и JWT-клейма отдаём "admin", чтобы строка всегда была валидной.
+        """
+        if not self.role and self.is_superuser:
+            return Role.ADMIN
+        return self.role
+
+    @property
     def is_admin(self):
         return self.role == Role.ADMIN or self.is_superuser
 
@@ -591,7 +602,8 @@ class Material(models.Model):
 
     title = models.CharField("название", max_length=200)
     description = models.TextField("описание", blank=True)
-    url = models.URLField("ссылка", blank=True)
+    # Имя поля `link` (не `url`) — так его ждёт фронтенд по контракту API.
+    link = models.URLField("ссылка", blank=True)
     subject = models.ForeignKey(
         Subject,
         verbose_name="предмет",

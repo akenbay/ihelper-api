@@ -145,14 +145,22 @@ class Command(BaseCommand):
         )
         parent.children.add(students[0])
 
-        for title, desc, subject, grade in [
-            ("Сборник задач по алгебре, 5 класс", "Задания для отработки уравнений.", math, "5"),
-            ("Рабочая тетрадь: Present Simple", "Упражнения на времена глагола.", english, "5"),
-            ("Диагностические тесты по математике", "Материалы для входного тестирования.", math, "6"),
-        ]:
+        materials = [
+            ("Сборник задач по алгебре, 5 класс", "Задания для отработки уравнений.",
+             math, "5", "https://materials.ihelper.kz/math/5/algebra-tasks.pdf"),
+            ("Рабочая тетрадь: Present Simple", "Упражнения на времена глагола.",
+             english, "5", "https://materials.ihelper.kz/eng/5/present-simple.pdf"),
+            ("Карточки: неправильные глаголы", "Набор карточек для запоминания.",
+             english, "5", "https://materials.ihelper.kz/eng/5/irregular-verbs.pdf"),
+            ("Диагностические тесты по математике", "Материалы для входного тестирования.",
+             math, "6", "https://materials.ihelper.kz/math/6/diagnostics.pdf"),
+            ("Геометрия: треугольники, 6 класс", "Теория и задачи по треугольникам.",
+             math, "6", "https://materials.ihelper.kz/math/6/triangles.pdf"),
+        ]
+        for title, desc, subject, grade, link in materials:
             Material.objects.get_or_create(
                 title=title,
-                defaults={"description": desc, "subject": subject, "grade": grade},
+                defaults={"description": desc, "subject": subject, "grade": grade, "link": link},
             )
 
         self._report(admin, coordinators, tutors, parent)

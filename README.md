@@ -19,7 +19,8 @@ python manage.py runserver
 
 Через Docker (поднимет Postgres рядом): `docker compose up --build`.
 
-Тесты: `python manage.py test` (34 теста: авто-журналы, веса итоговой оценки, права, приглашения).
+Тесты: `python manage.py test` (43 теста: авто-журналы, веса итоговой оценки, права, приглашения,
+логин по email, сброс пароля, материалы).
 
 ## Роли
 
@@ -72,11 +73,11 @@ python manage.py runserver
 ### Аутентификация
 | Метод | Путь | |
 |---|---|---|
-| POST | `/api/auth/login` | `{username, password}` → `{access, refresh, user}` |
+| POST | `/api/auth/login` | `{username, password}` (в username можно передать email) → `{access, refresh, user}` |
 | POST | `/api/auth/refresh` | обновление access-токена |
 | GET | `/api/auth/me` | текущий пользователь |
 | POST | `/api/auth/password-reset` | запрос ссылки на сброс |
-| POST | `/api/auth/password-reset/confirm` | `{uid, token, password}` |
+| POST | `/api/auth/password-reset/confirm` | `{token, password}` (token самодостаточный) |
 | GET | `/api/auth/invite/<token>` | проверка ссылки-приглашения |
 | POST | `/api/auth/invite/accept` | `{token, password, full_name}` → создаётся аккаунт родителя |
 

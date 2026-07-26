@@ -2,6 +2,7 @@
 
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
@@ -27,21 +28,40 @@ from .scoping import scoped_journals, scoped_schedule_entries
 
 
 class LoginSerializer(TokenObtainPairSerializer):
-    """JWT-логин: к токенам добавляем профиль, чтобы фронт сразу знал роль."""
+    """JWT-логин: принимает username ИЛИ email, к токенам добавляет профиль."""
 
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        token["role"] = user.role
+        # Клейм role строго в нижнем регистре — фронт читает его как запасной вариант.
+        token["role"] = user.effective_role
         return token
 
     def validate(self, attrs):
+        # Фронт кладёт одно и то же значение в username и email. Принимаем и логин,
+        # и email: находим пользователя по username ИЛИ email и подставляем его
+        # реальный username, чтобы SimpleJWT смог аутентифицировать по USERNAME_FIELD.
+        credential = attrs.get(self.username_field)
+        if credential:
+            match = (
+                User.objects.filter(
+                    Q(username__iexact=credential) | Q(email__iexact=credential)
+                )
+                .order_by("id")
+                .first()
+            )
+            if match is not None:
+                attrs[self.username_field] = match.get_username()
+
         data = super().validate(attrs)
         data["user"] = UserSerializer(self.user).data
         return data
 
 
 class UserSerializer(serializers.ModelSerializer):
+    # role отдаём через effective_role: суперюзер без явной роли получает "admin".
+    role = serializers.CharField(source="effective_role", read_only=True)
+
     class Meta:
         model = User
         fields = ["id", "username", "email", "full_name", "phone", "role"]
@@ -113,7 +133,7 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
-    uid = serializers.CharField()
+    # Токен самодостаточный (внутри закодирован uid) — фронт присылает только его.
     token = serializers.CharField()
     password = PasswordField()
 
@@ -140,7 +160,7 @@ class MaterialSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Material
-        fields = ["id", "title", "description", "url", "subject", "subject_name", "grade"]
+        fields = ["id", "title", "description", "link", "subject", "subject_name", "grade"]
 
 
 # --- Ученики ------------------------------------------------------------
