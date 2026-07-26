@@ -10,6 +10,8 @@ ORG-SCOPE: когда появится вторая организация (СД
 в каждый get_queryset() ниже.
 """
 
+import logging
+
 from django.conf import settings
 from django.db.models import Prefetch, Q
 from rest_framework import mixins, status, viewsets
@@ -62,6 +64,8 @@ from .serializers import (
     TutorSerializer,
     UserSerializer,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- Аутентификация -----------------------------------------------------
 
@@ -283,7 +287,17 @@ class StudentViewSet(viewsets.ModelViewSet):
         return scoped_students(self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        student = serializer.save(created_by=self.request.user)
+        # Приглашение НЕ отправляется при создании (по дизайну — отдельная ручка
+        # invite_parent). Отметим в логе случай без parent_email: пригласить
+        # родителя будет нельзя, пока email не проставят.
+        if not (student.parent_email or "").strip():
+            logger.info(
+                "Ученик %s (id=%s) создан без parent_email — приглашение родителя "
+                "невозможно, пока email не будет указан.",
+                student.full_name,
+                student.pk,
+            )
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdminOrCoordinator])
     def invite_parent(self, request, pk=None):
