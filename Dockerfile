@@ -32,6 +32,7 @@ COPY requirements.txt .
 RUN pip install --no-index --find-links=/wheels -r requirements.txt && rm -rf /wheels
 
 COPY . .
+RUN chmod +x entrypoint.sh
 
 # collectstatic на этапе сборки: в рантайме статика уже готова, отдаёт её WhiteNoise.
 # SECRET_KEY здесь фиктивный и в образ не попадает как секрет — collectstatic просто
@@ -42,8 +43,9 @@ RUN SECRET_KEY=build-only DEBUG=False python manage.py collectstatic --noinput
 RUN useradd --create-home --uid 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# Render прокидывает $PORT; Dokploy — нет (entrypoint откатывается на 8000).
 EXPOSE 8000
 
-# Миграции запускаются отдельной release-командой при деплое (см. README):
-#   python manage.py migrate
-CMD ["gunicorn", "ihelper.wsgi", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "60", "--access-logfile", "-"]
+# entrypoint.sh: migrate на старте контейнера, затем gunicorn на 0.0.0.0:${PORT:-8000}.
+# Shell-скрипт (а не exec-JSON gunicorn) — иначе ${PORT} не раскроется.
+ENTRYPOINT ["./entrypoint.sh"]

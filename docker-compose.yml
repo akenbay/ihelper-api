@@ -17,7 +17,7 @@ services:
 
   api:
     build: .
-    command: sh -c "python manage.py migrate && gunicorn ihelper.wsgi --bind 0.0.0.0:8000 --access-logfile -"
+    # Старт (migrate + gunicorn) задаёт entrypoint.sh образа. PORT здесь не задан → 8000.
     environment:
       SECRET_KEY: dev-secret-key
       DEBUG: "True"
