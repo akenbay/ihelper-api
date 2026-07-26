@@ -141,8 +141,10 @@ CORS_ALLOW_CREDENTIALS = False  # JWT ходит в Authorization-заголов
 CSRF_TRUSTED_ORIGINS = [o for o in CORS_ALLOWED_ORIGINS if o.startswith("https://")]
 
 # --- Email --------------------------------------------------------------
-# Заглушка: письма печатаются в консоль. Реальная отправка (Brevo) подключается
-# в core/emails.py — там единственная точка интеграции.
+# core/emails.py — единственная точка интеграции с почтой.
+# Есть BREVO_API_KEY → письма уходят через Brevo (transactional API).
+# Ключа нет (локальная разработка) → откат на Django EMAIL_BACKEND (console: в лог).
+BREVO_API_KEY = env.str("BREVO_API_KEY", default="")
 EMAIL_BACKEND = env.str(
     "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
 )

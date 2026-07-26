@@ -4,13 +4,16 @@ python manage.py test
 """
 
 from datetime import time, timedelta
+from unittest import mock
 
+import requests
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from core import services
+from core import emails, services
 from core.models import (
     Group,
     Journal,
@@ -565,3 +568,78 @@ class MaterialTests(BaseFixture):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+
+@override_settings(BREVO_API_KEY="test-key", DEFAULT_FROM_EMAIL="IHelper <noreply@ihelper.kz>")
+class BrevoEmailTests(BaseFixture):
+    """Отправка через Brevo. requests замокан — реальных писем не шлём."""
+
+    def test_send_email_posts_correct_brevo_payload(self):
+        with mock.patch("core.emails.requests.post") as post:
+            post.return_value = mock.Mock(status_code=201, raise_for_status=mock.Mock())
+            ok = emails.send_email(to="p@example.kz", subject="Тема", body="Текст")
+
+        self.assertTrue(ok)
+        url, kwargs = post.call_args.args[0], post.call_args.kwargs
+        self.assertEqual(url, emails.BREVO_API_URL)
+        self.assertEqual(kwargs["headers"]["api-key"], "test-key")
+        payload = kwargs["json"]
+        # DEFAULT_FROM_EMAIL в формате «Имя <адрес>» разбирается на name/email.
+        self.assertEqual(payload["sender"], {"name": "IHelper", "email": "noreply@ihelper.kz"})
+        self.assertEqual(payload["to"], [{"email": "p@example.kz"}])
+        self.assertEqual(payload["subject"], "Тема")
+        self.assertEqual(payload["textContent"], "Текст")
+
+    def test_invite_email_subject_and_link(self):
+        with mock.patch("core.emails.requests.post") as post:
+            post.return_value = mock.Mock(raise_for_status=mock.Mock())
+            emails.send_parent_invite_email(
+                email="p@example.kz", student=self.alisher, link="https://front/invite/abc"
+            )
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["subject"], "Приглашение в IHelper")
+        self.assertIn("https://front/invite/abc", payload["textContent"])
+
+    def test_report_notification_has_no_grades_only_link(self):
+        with mock.patch("core.emails.requests.post") as post:
+            post.return_value = mock.Mock(raise_for_status=mock.Mock())
+            emails.send_report_notification_email(email="p@example.kz", student=self.alisher)
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["subject"], "Новый отчёт по успеваемости")
+        self.assertIn("/login", payload["textContent"])
+        # Data-minimization: ни оценок, ни фидбека в теле.
+        self.assertNotIn("оценка", payload["textContent"].lower())
+
+    def test_brevo_failure_does_not_raise_and_returns_false(self):
+        with mock.patch("core.emails.requests.post", side_effect=requests.RequestException("boom")):
+            ok = emails.send_email(to="p@example.kz", subject="Тема", body="Текст")
+        self.assertFalse(ok)
+
+    def test_invite_creation_survives_email_failure(self):
+        # Требование: письмо упало → приглашение всё равно создано и токен возвращён.
+        with mock.patch(
+            "core.emails.requests.post", side_effect=requests.RequestException("boom")
+        ):
+            invite, raw_token = services.create_parent_invite(
+                student=self.alisher, created_by=self.coordinator
+            )
+
+        self.assertTrue(raw_token)
+        self.assertTrue(services.ParentInvite.objects.filter(pk=invite.pk).exists())
+        self.assertTrue(invite.is_usable)
+
+
+class EmailFallbackTests(BaseFixture):
+    @override_settings(BREVO_API_KEY="")
+    def test_without_key_falls_back_to_django_backend(self):
+        # Без ключа Brevo не вызывается, letter уходит через Django (console в деве).
+        with mock.patch("core.emails.requests.post") as post, mock.patch(
+            "core.emails.send_mail"
+        ) as send_mail:
+            ok = emails.send_email(to="p@example.kz", subject="Тема", body="Текст")
+
+        self.assertTrue(ok)
+        post.assert_not_called()
+        send_mail.assert_called_once()
