@@ -167,10 +167,12 @@ class Command(BaseCommand):
 
     # --- helpers --------------------------------------------------------
 
-    def _user(self, username, full_name, role, **extra):
-        email = extra.pop("email", f"{username}@ihelper.kz")
+    def _user(self, handle, full_name, role, **extra):
+        # username == email — как у аккаунтов, создаваемых через API. `handle` —
+        # локальная часть логина (или уже готовый email для родителя).
+        email = extra.pop("email", f"{handle}@ihelper.kz")
         user, created = User.objects.get_or_create(
-            username=username,
+            username=email,
             defaults={"full_name": full_name, "role": role, "email": email, **extra},
         )
         if created:
@@ -294,8 +296,9 @@ class Command(BaseCommand):
         out.write(f"  Тестов:     {Test.objects.count()} / результатов: {TestResult.objects.count()}")
         out.write(f"  Расписание: {ScheduleEntry.objects.count()} занятий\n")
 
-        out.write(f"Пароль у всех демо-аккаунтов: {DEMO_PASSWORD}\n")
-        out.write("  Админ:        admin")
+        out.write(f"Пароль у всех демо-аккаунтов: {DEMO_PASSWORD}")
+        out.write("Логин = email (username == email).\n")
+        out.write(f"  Админ:        {admin.username}")
         for c in coordinators:
             out.write(f"  Координатор:  {c.username} ({c.full_name})")
         for t in tutors:
