@@ -718,6 +718,66 @@ class StaffInviteTests(BaseFixture):
         # Та же форма ссылки, что и у родителей: {FRONTEND_URL}/invite/<token>.
         self.assertIn("/invite/", response.data["invite_link"])
 
+    def _create_coordinator(self, username):
+        self.auth(self.admin)
+        response = self.client.post(
+            reverse("coordinator-list"),
+            {"username": username, "full_name": "Пере Выпуск", "email": f"{username}@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        return response.data
+
+    def test_reinvite_regenerates_link_and_invalidates_old_token(self):
+        created = self._create_coordinator("coord.re")
+        old_token = self._token_from_link(created["invite_link"])
+
+        # Перевыпуск ссылки (аккаунт ещё не активирован).
+        reinvite = self.client.post(reverse("coordinator-reinvite", args=[created["id"]]))
+        self.assertEqual(reinvite.status_code, status.HTTP_200_OK, reinvite.data)
+        self.assertIn("invite_link", reinvite.data)
+        new_token = self._token_from_link(reinvite.data["invite_link"])
+        self.assertNotEqual(new_token, old_token)
+
+        # Старый токен больше не работает.
+        self.client.credentials()
+        old_info = self.client.get(reverse("invite_info", args=[old_token]))
+        self.assertEqual(old_info.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Новый принимается, логин работает, роль верна.
+        self._accept_and_login(
+            reinvite.data["invite_link"], "coord.re", "CoordPass!2026", Role.COORDINATOR
+        )
+
+    def test_reinvite_rejected_once_account_active(self):
+        created = self._create_coordinator("coord.act")
+        token = self._token_from_link(created["invite_link"])
+
+        # Активируем аккаунт (принимаем исходное приглашение).
+        self.client.credentials()
+        accepted = self.client.post(
+            reverse("invite_accept"),
+            {"token": token, "password": "CoordPass!2026"},
+            format="json",
+        )
+        self.assertEqual(accepted.status_code, status.HTTP_201_CREATED, accepted.data)
+
+        # Теперь перевыпуск запрещён — иначе это был бы сброс пароля активного аккаунта.
+        self.auth(self.admin)
+        rejected = self.client.post(reverse("coordinator-reinvite", args=[created["id"]]))
+        self.assertEqual(rejected.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_coordinator_can_reinvite_tutor(self):
+        self.auth(self.coordinator)
+        created = self.client.post(
+            reverse("tutor-list"),
+            {"username": "tutor.re", "full_name": "Тьютор", "email": "tr@ihelper.kz"},
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+
+        reinvite = self.client.post(reverse("tutor-reinvite", args=[created.data["id"]]))
+        self.assertEqual(reinvite.status_code, status.HTTP_200_OK, reinvite.data)
+        self.assertIn("invite_link", reinvite.data)
+
 
 class EmailFallbackTests(BaseFixture):
     @override_settings(BREVO_API_KEY="")

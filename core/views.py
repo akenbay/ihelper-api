@@ -213,6 +213,32 @@ class StaffInviteCreateMixin:
         headers = self.get_success_headers(serializer.data)
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
+    @action(detail=True, methods=["post"])
+    def reinvite(self, request, pk=None):
+        """POST .../<id>/reinvite/ — перевыпустить ссылку-приглашение сотрудника.
+
+        Для случая, когда исходная ссылка потеряна или протухла. Разрешено только
+        пока аккаунт не активирован (пароль не задан) — активному сотруднику так
+        пароль не сбросить. get_object() уже отфильтрован queryset'ом и правами
+        вьюсета, поэтому проверка ролей та же, что и при создании (админ —
+        координаторов, координатор/админ — тьюторов).
+
+        create_staff_invite сам гасит прежнее непринятое приглашение и выдаёт новое
+        по той же токен/хеш/срок-логике — старая ссылка перестаёт работать.
+        Ответ той же формы, что и при создании (поля + invite_link).
+        """
+        user = self.get_object()
+        if user.has_usable_password():
+            return Response(
+                {"detail": "Аккаунт уже активирован — ссылку-приглашение перевыпустить нельзя."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        _invite, raw_token = services.create_staff_invite(user, created_by=request.user)
+        data = dict(self.get_serializer(user).data)
+        data["invite_link"] = services.invite_link(raw_token)
+        return Response(data, status=status.HTTP_200_OK)
+
 
 class CoordinatorViewSet(StaffInviteCreateMixin, viewsets.ModelViewSet):
     """/api/coordinators/ — только админ: создаёт и удаляет координаторов.
