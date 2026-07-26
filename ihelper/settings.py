@@ -152,6 +152,8 @@ DEFAULT_FROM_EMAIL = env.str("DEFAULT_FROM_EMAIL", default="noreply@ihelper.kz")
 
 # --- Приглашения родителей ---------------------------------------------
 PARENT_INVITE_TTL_HOURS = env.int("PARENT_INVITE_TTL_HOURS", default=72)
+# Приглашение сотрудника (координатор/тьютор) живёт дольше — ссылку передают вручную.
+STAFF_INVITE_TTL_HOURS = env.int("STAFF_INVITE_TTL_HOURS", default=168)  # 7 дней
 
 # --- Security (включается за HTTPS-прокси Dokploy) ----------------------
 # Под тестами не включаем: SECURE_SSL_REDIRECT отдавал бы 301 на каждый запрос

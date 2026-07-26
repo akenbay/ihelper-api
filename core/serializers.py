@@ -9,10 +9,10 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import (
     Coordinator,
     Group,
+    Invite,
     Journal,
     LessonReport,
     Material,
-    ParentInvite,
     Role,
     ScheduleEntry,
     Student,
@@ -84,32 +84,29 @@ class PasswordField(serializers.CharField):
 
 
 class StaffAccountSerializer(serializers.ModelSerializer):
-    """Общий сериализатор для аккаунтов, создаваемых «сверху» (координатор, тьютор).
+    """Аккаунты, создаваемые «сверху» (координатор, тьютор).
 
-    Публичной регистрации нет: пароль задаёт создающий, аккаунт заводится админом
-    или координатором.
+    Публичной регистрации нет. Пароль здесь НЕ задаётся: аккаунт создаётся без
+    рабочего пароля, а вьюсет в ответ на создание отдаёт invite_link — сотрудник
+    задаёт пароль сам по ссылке-приглашению (тот же механизм, что у родителей).
     """
 
-    password = PasswordField(required=True)
     role_value = None
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "full_name", "phone", "password", "is_active"]
+        fields = ["id", "username", "email", "full_name", "phone", "is_active"]
 
     def create(self, validated_data):
-        password = validated_data.pop("password")
         user = User(**validated_data, role=self.role_value)
-        user.set_password(password)
+        # Логин без пароля невозможен, пока сотрудник не примет приглашение.
+        user.set_unusable_password()
         user.save()
         return user
 
     def update(self, instance, validated_data):
-        password = validated_data.pop("password", None)
         for field, value in validated_data.items():
             setattr(instance, field, value)
-        if password:
-            instance.set_password(password)
         instance.save()
         return instance
 
@@ -471,7 +468,7 @@ class ParentInviteSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
 
     class Meta:
-        model = ParentInvite
+        model = Invite
         fields = [
             "id",
             "student",

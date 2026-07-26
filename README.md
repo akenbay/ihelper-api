@@ -78,14 +78,14 @@ python manage.py runserver
 | GET | `/api/auth/me` | текущий пользователь |
 | POST | `/api/auth/password-reset` | запрос ссылки на сброс |
 | POST | `/api/auth/password-reset/confirm` | `{token, password}` (token самодостаточный) |
-| GET | `/api/auth/invite/<token>` | проверка ссылки-приглашения |
-| POST | `/api/auth/invite/accept` | `{token, password, full_name}` → создаётся аккаунт родителя |
+| GET | `/api/auth/invite/<token>` | проверка ссылки-приглашения (любая роль) |
+| POST | `/api/auth/invite/accept` | `{token, password, full_name}` → задаёт пароль аккаунту (координатор/тьютор/родитель) |
 
 ### Ресурсы
 | Путь | Кто пишет | Кто читает |
 |---|---|---|
-| `/api/coordinators/` | admin | admin |
-| `/api/tutors/` | coordinator, admin | coordinator, admin |
+| `/api/coordinators/` | admin | admin |  ← POST отдаёт `invite_link`
+| `/api/tutors/` | coordinator, admin | coordinator, admin |  ← POST отдаёт `invite_link`
 | `/api/students/` | coordinator | tutor (своих), parent (своих детей) |
 | `/api/subjects/` | coordinator | все |
 | `/api/groups/` | coordinator | tutor (свои), parent (группы детей) |
@@ -106,15 +106,24 @@ python manage.py runserver
 - `GET /api/reports/journal/?student=&subject=&group=&date_from=&date_to=` — выгрузка журнала
   за период (уроки фильтруются по периоду; итог считается по всему курсу)
 
-## Приглашение родителей
+## Приглашения (координатор / тьютор / родитель)
 
-Открытой регистрации нет. Координатор создаёт ученика с `parent_email` и вызывает
-`POST /api/students/{id}/invite_parent/`. Генерируется одноразовый токен
-(`secrets.token_urlsafe(32)`); в БД лежит **только SHA-256 хеш**, сырой токен уходит
-исключительно в письмо и живёт `PARENT_INVITE_TTL_HOURS` часов (по умолчанию 72).
-Родитель переходит по ссылке, задаёт пароль → создаётся аккаунт `role=parent`, привязанный
-к ученику. Переход по ссылке = подтверждение email, отдельная верификация не нужна.
+Открытой регистрации нет. У всех трёх login-ролей пароль задаётся через один механизм —
+модель `Invite` и эндпоинты `/api/auth/invite/<token>` + `/api/auth/invite/accept`.
+Токен один и тот же для всех ролей: `secrets.token_urlsafe(32)`, в БД лежит **только
+SHA-256 хеш**, сырой токен живёт лишь в ссылке `{FRONTEND_URL}/invite/<token>`.
+`accept` (`{token, password}`) корректно проставляет роль на итоговом аккаунте.
 
+**Сотрудники (координатор, тьютор).** `POST /api/coordinators/` (админ) и `POST /api/tutors/`
+(координатор) создают аккаунт **без рабочего пароля** и возвращают `invite_link` прямо в теле
+ответа — админ/координатор копирует ссылку и передаёт её вручную (письмо этим ролям пока не
+шлётся; TTL `STAFF_INVITE_TTL_HOURS`, по умолчанию 7 дней). Сотрудник переходит по ссылке,
+задаёт пароль — получает рабочий логин.
+
+**Родители.** Координатор создаёт ученика с `parent_email` и вызывает
+`POST /api/students/{id}/invite_parent/`. Ссылка уходит на email через Brevo (TTL
+`PARENT_INVITE_TTL_HOURS`, по умолчанию 72 ч). На `accept` создаётся аккаунт `role=parent`,
+привязанный к ученику. Переход по ссылке = подтверждение email, отдельная верификация не нужна.
 Если у родителя двое детей — второе приглашение не создаёт второй аккаунт, а привязывает
 ещё одного ребёнка к существующему; пароль при этом не перезаписывается (иначе владение
 ссылкой означало бы смену пароля чужого аккаунта).

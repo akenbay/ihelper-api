@@ -624,17 +624,42 @@ class Material(models.Model):
         return self.title
 
 
-class ParentInvite(models.Model):
-    """Одноразовое приглашение родителя.
+class Invite(models.Model):
+    """Одноразовое приглашение для аккаунта с логином (coordinator/tutor/parent).
 
-    Сырой токен в БД не хранится — только SHA-256 хеш (как пароль). Ссылка с
-    сырым токеном уходит на email и больше нигде не появляется.
+    Единый механизм для всех трёх login-ролей — токен генерируется, хешируется и
+    протухает одинаково, никакого дублирования. Различие только в том, к чему
+    приглашение привязано и что делает accept:
+
+      - staff (coordinator/tutor): `user` уже создан (админом/координатором) БЕЗ
+        рабочего пароля; accept ставит пароль этому пользователю.
+      - parent: `user` пуст, зато задан `student`; accept создаёт (или находит)
+        родителя и привязывает к нему ученика.
+
+    Сырой токен в БД не хранится — только SHA-256 хеш (как пароль). Сырой токен
+    живёт лишь в ссылке-приглашении.
     """
 
-    student = models.ForeignKey(
-        Student, verbose_name="ученик", on_delete=models.CASCADE, related_name="parent_invites"
+    role = models.CharField("роль", max_length=20, choices=Role.choices)
+    email = models.EmailField("email", blank=True)
+    # staff: заполнен сразу; parent: пуст до accept.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="аккаунт",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="invites",
     )
-    email = models.EmailField("email родителя")
+    # только для parent-приглашений.
+    student = models.ForeignKey(
+        Student,
+        verbose_name="ученик",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="parent_invites",
+    )
     token_hash = models.CharField("хеш токена", max_length=64, unique=True)
     expires_at = models.DateTimeField("действует до")
     accepted_at = models.DateTimeField("принято", null=True, blank=True)
@@ -649,12 +674,13 @@ class ParentInvite(models.Model):
     created_at = models.DateTimeField("создано", auto_now_add=True)
 
     class Meta:
-        verbose_name = "приглашение родителя"
-        verbose_name_plural = "приглашения родителей"
+        verbose_name = "приглашение"
+        verbose_name_plural = "приглашения"
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"Приглашение {self.email} → {self.student.full_name}"
+        target = self.student.full_name if self.student else (self.email or "—")
+        return f"Приглашение [{self.role}] → {target}"
 
     @property
     def is_expired(self):

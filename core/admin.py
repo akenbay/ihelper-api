@@ -7,7 +7,7 @@ from .models import (
     LessonReport,
     Material,
     Organization,
-    ParentInvite,
+    Invite,
     ScheduleEntry,
     Student,
     Subject,
@@ -61,7 +61,7 @@ class TestResultAdmin(admin.ModelAdmin):
     list_filter = ["test__test_type"]
 
 
-admin.site.register([Subject, ScheduleEntry, Test, Material, ParentInvite, Organization])
+admin.site.register([Subject, ScheduleEntry, Test, Material, Invite, Organization])
 
 admin.site.site_header = "IHelper — администрирование"
 admin.site.site_title = "IHelper"

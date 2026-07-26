@@ -331,24 +331,23 @@ class PermissionTests(BaseFixture):
         self.auth(self.admin)
         response = self.client.post(
             reverse("coordinator-list"),
-            {
-                "username": "new.coord",
-                "full_name": "Новый Координатор",
-                "password": "StrongPass!2024",
-            },
+            {"username": "new.coord", "full_name": "Новый Координатор"},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(User.objects.get(username="new.coord").role, Role.COORDINATOR)
+        # Пароль не задаётся напрямую — аккаунт создаётся без рабочего пароля.
+        self.assertIn("invite_link", response.data)
 
     def test_coordinator_creates_tutor(self):
         self.auth(self.coordinator)
         response = self.client.post(
             reverse("tutor-list"),
-            {"username": "new.tutor", "full_name": "Новый Тьютор", "password": "StrongPass!2024"},
+            {"username": "new.tutor", "full_name": "Новый Тьютор"},
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertEqual(User.objects.get(username="new.tutor").role, Role.TUTOR)
+        self.assertIn("invite_link", response.data)
 
     def test_anonymous_is_rejected(self):
         self.assertEqual(
@@ -627,8 +626,97 @@ class BrevoEmailTests(BaseFixture):
             )
 
         self.assertTrue(raw_token)
-        self.assertTrue(services.ParentInvite.objects.filter(pk=invite.pk).exists())
+        self.assertTrue(services.Invite.objects.filter(pk=invite.pk).exists())
         self.assertTrue(invite.is_usable)
+
+
+class StaffInviteTests(BaseFixture):
+    """Единый invite-механизм для координаторов и тьюторов.
+
+    Создание аккаунта отдаёт invite_link; переход по нему + {token, password}
+    даёт рабочий логин с правильной ролью — тот же контракт, что у родителей.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.admin = make_user("root", Role.ADMIN, is_staff=True)
+
+    @staticmethod
+    def _token_from_link(link):
+        return link.rsplit("/", 1)[-1]
+
+    def _accept_and_login(self, invite_link, username, password, expected_role):
+        token = self._token_from_link(invite_link)
+
+        # GET проверки ссылки работает одинаково для любой роли.
+        info = self.client.get(reverse("invite_info", args=[token]))
+        self.assertEqual(info.status_code, status.HTTP_200_OK, info.data)
+        self.assertEqual(info.data["role"], expected_role)
+
+        accept = self.client.post(
+            reverse("invite_accept"),
+            {"token": token, "password": password},
+            format="json",
+        )
+        self.assertEqual(accept.status_code, status.HTTP_201_CREATED, accept.data)
+
+        # Рабочий логин с нужной ролью.
+        login = self.client.post(
+            reverse("login"),
+            {"username": username, "password": password},
+            format="json",
+        )
+        self.assertEqual(login.status_code, status.HTTP_200_OK, login.data)
+        self.assertEqual(login.data["user"]["role"], expected_role)
+        return token
+
+    def test_admin_invites_coordinator_end_to_end(self):
+        self.auth(self.admin)
+        response = self.client.post(
+            reverse("coordinator-list"),
+            {"username": "coord.new", "full_name": "Новый Координатор", "email": "c@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertIn("invite_link", response.data)
+
+        # Аккаунт создан, но без рабочего пароля до приёма приглашения.
+        user = User.objects.get(username="coord.new")
+        self.assertFalse(user.has_usable_password())
+
+        self.client.credentials()  # приём приглашения — анонимно
+        self._accept_and_login(
+            response.data["invite_link"], "coord.new", "CoordPass!2026", Role.COORDINATOR
+        )
+
+    def test_coordinator_invites_tutor_end_to_end(self):
+        self.auth(self.coordinator)
+        response = self.client.post(
+            reverse("tutor-list"),
+            {"username": "tutor.new", "full_name": "Новый Тьютор", "email": "t@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertIn("invite_link", response.data)
+
+        self.client.credentials()
+        token = self._accept_and_login(
+            response.data["invite_link"], "tutor.new", "TutorPass!2026", Role.TUTOR
+        )
+
+        # Одноразовость: повторный приём той же ссылки отклоняется.
+        second = self.client.post(
+            reverse("invite_accept"),
+            {"token": token, "password": "TutorPass!2026"},
+            format="json",
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_staff_invite_link_points_to_shared_invite_endpoint(self):
+        self.auth(self.admin)
+        response = self.client.post(
+            reverse("coordinator-list"), {"username": "coord.x", "full_name": "X"}
+        )
+        # Та же форма ссылки, что и у родителей: {FRONTEND_URL}/invite/<token>.
+        self.assertIn("/invite/", response.data["invite_link"])
 
 
 class EmailFallbackTests(BaseFixture):

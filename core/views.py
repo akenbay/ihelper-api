@@ -24,9 +24,9 @@ from .emails import send_password_reset_email
 from .models import (
     Coordinator,
     Group,
+    Invite,
     LessonReport,
     Material,
-    ParentInvite,
     Role,
     Student,
     Subject,
@@ -132,7 +132,12 @@ class PasswordResetConfirmView(APIView):
 
 
 class InviteInfoView(APIView):
-    """GET /api/auth/invite/<token> — проверка ссылки перед показом формы пароля."""
+    """GET /api/auth/invite/<token> — проверка ссылки перед показом формы пароля.
+
+    Работает одинаково для любой роли. `student_name` заполнен только у родительских
+    приглашений (у сотрудников он null) — форма фронта уже читает email/student_name,
+    поле `role` добавлено сверху и обратную совместимость не ломает.
+    """
 
     permission_classes = [AllowAny]
     throttle_scope = "auth"
@@ -145,15 +150,21 @@ class InviteInfoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(
-            {"email": invite.email, "student_name": invite.student.full_name}
+            {
+                "email": invite.email,
+                "role": invite.role,
+                "student_name": invite.student.full_name if invite.student else None,
+                "full_name": invite.user.full_name if invite.user else "",
+            }
         )
 
 
 class InviteAcceptView(APIView):
-    """POST /api/auth/invite/accept — родитель задаёт пароль, аккаунт создаётся.
+    """POST /api/auth/invite/accept — приём приглашения для любой роли.
 
-    Переход по ссылке из письма = подтверждение владения email, поэтому отдельная
-    верификация не нужна.
+    Родителю создаёт аккаунт, сотруднику (координатор/тьютор) ставит пароль на уже
+    заведённый аккаунт. Контракт (тело/ответ) один и тот же — фронт не меняется.
+    Переход по ссылке из письма/ручной ссылки = подтверждение владения email.
     """
 
     permission_classes = [AllowAny]
@@ -164,18 +175,18 @@ class InviteAcceptView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        parent = services.accept_parent_invite(
+        user = services.accept_invite(
             raw_token=data["token"],
             password=data["password"],
             full_name=data.get("full_name", ""),
         )
-        if parent is None:
+        if user is None:
             return Response(
                 {"detail": "Ссылка недействительна или устарела."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(
-            {"detail": "Аккаунт создан. Теперь вы можете войти.", "username": parent.username},
+            {"detail": "Аккаунт готов. Теперь вы можете войти.", "username": user.username},
             status=status.HTTP_201_CREATED,
         )
 
@@ -183,8 +194,31 @@ class InviteAcceptView(APIView):
 # --- Аккаунты -----------------------------------------------------------
 
 
-class CoordinatorViewSet(viewsets.ModelViewSet):
-    """/api/coordinators/ — только админ: создаёт и удаляет координаторов."""
+class StaffInviteCreateMixin:
+    """Создание сотрудника → аккаунт без пароля + одноразовое приглашение.
+
+    В ответ на создание кладём invite_link, чтобы админ/координатор скопировал
+    ссылку и передал её вручную (письмо этим ролям пока не шлём). Пароль сотрудник
+    задаёт по ссылке через /api/auth/invite/accept.
+    """
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        _invite, raw_token = services.create_staff_invite(user, created_by=request.user)
+
+        data = dict(serializer.data)
+        data["invite_link"] = services.invite_link(raw_token)
+        headers = self.get_success_headers(serializer.data)
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
+
+
+class CoordinatorViewSet(StaffInviteCreateMixin, viewsets.ModelViewSet):
+    """/api/coordinators/ — только админ: создаёт и удаляет координаторов.
+
+    POST возвращает поля координатора + invite_link.
+    """
 
     queryset = Coordinator.objects.all().order_by("full_name")
     serializer_class = CoordinatorSerializer
@@ -192,8 +226,11 @@ class CoordinatorViewSet(viewsets.ModelViewSet):
     search_fields = ["full_name", "username", "email"]
 
 
-class TutorViewSet(viewsets.ModelViewSet):
-    """/api/tutors/ — координатор (и админ) создаёт и удаляет тьюторов."""
+class TutorViewSet(StaffInviteCreateMixin, viewsets.ModelViewSet):
+    """/api/tutors/ — координатор (и админ) создаёт и удаляет тьюторов.
+
+    POST возвращает поля тьютора + invite_link.
+    """
 
     queryset = Tutor.objects.all().order_by("full_name")
     serializer_class = TutorSerializer
@@ -418,9 +455,13 @@ class ParentInviteViewSet(
     mixins.DestroyModelMixin,
     viewsets.GenericViewSet,
 ):
-    """/api/parent-invite/ — координатор создаёт и переотправляет приглашения."""
+    """/api/parent-invite/ — координатор создаёт и переотправляет приглашения родителей.
 
-    queryset = ParentInvite.objects.select_related("student")
+    Только родительские приглашения (staff-приглашения выдаются при создании аккаунта
+    на /api/coordinators/ и /api/tutors/).
+    """
+
+    queryset = Invite.objects.filter(role=Role.PARENT).select_related("student")
     serializer_class = ParentInviteSerializer
     permission_classes = [IsAdminOrCoordinator]
     filterset_fields = ["student", "email"]
