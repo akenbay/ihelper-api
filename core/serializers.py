@@ -86,18 +86,43 @@ class PasswordField(serializers.CharField):
 class StaffAccountSerializer(serializers.ModelSerializer):
     """Аккаунты, создаваемые «сверху» (координатор, тьютор).
 
-    Публичной регистрации нет. Пароль здесь НЕ задаётся: аккаунт создаётся без
-    рабочего пароля, а вьюсет в ответ на создание отдаёт invite_link — сотрудник
-    задаёт пароль сам по ссылке-приглашению (тот же механизм, что у родителей).
+    Публичной регистрации нет. Фронт присылает только full_name, email, phone —
+    отдельного username в контракте нет: username всегда равен email (Django
+    принимает @ и . в username, преобразование не требуется). Пароль здесь не
+    задаётся: аккаунт создаётся без рабочего пароля, а вьюсет в ответ отдаёт
+    invite_link — сотрудник задаёт пароль по ссылке-приглашению.
     """
 
     role_value = None
+    # email обязателен и служит логином; понятные ошибки на русском.
+    email = serializers.EmailField(
+        required=True,
+        allow_blank=False,
+        error_messages={
+            "required": "Email обязателен.",
+            "blank": "Email обязателен.",
+            "invalid": "Некорректный email.",
+        },
+    )
 
     class Meta:
         model = User
         fields = ["id", "username", "email", "full_name", "phone", "is_active"]
+        # username в запросе не принимаем — он выводится, но всегда = email.
+        read_only_fields = ["username"]
+
+    def validate_email(self, value):
+        # username == email, поэтому чужой email или чужой username с таким значением
+        # оба означают конфликт — ловим до IntegrityError на уровне БД.
+        clashes = User.objects.filter(Q(email__iexact=value) | Q(username__iexact=value))
+        if self.instance is not None:
+            clashes = clashes.exclude(pk=self.instance.pk)
+        if clashes.exists():
+            raise serializers.ValidationError("Пользователь с таким email уже существует.")
+        return value
 
     def create(self, validated_data):
+        validated_data["username"] = validated_data["email"]  # ровно email, без преобразований
         user = User(**validated_data, role=self.role_value)
         # Логин без пароля невозможен, пока сотрудник не примет приглашение.
         user.set_unusable_password()
@@ -105,6 +130,9 @@ class StaffAccountSerializer(serializers.ModelSerializer):
         return user
 
     def update(self, instance, validated_data):
+        # Email сменили → username идёт следом, чтобы они всегда совпадали.
+        if "email" in validated_data:
+            validated_data["username"] = validated_data["email"]
         for field, value in validated_data.items():
             setattr(instance, field, value)
         instance.save()

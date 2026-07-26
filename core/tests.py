@@ -331,10 +331,12 @@ class PermissionTests(BaseFixture):
         self.auth(self.admin)
         response = self.client.post(
             reverse("coordinator-list"),
-            {"username": "new.coord", "full_name": "Новый Координатор"},
+            {"full_name": "Новый Координатор", "email": "new.coord@ihelper.kz"},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertEqual(User.objects.get(username="new.coord").role, Role.COORDINATOR)
+        coord = User.objects.get(email="new.coord@ihelper.kz")
+        self.assertEqual(coord.role, Role.COORDINATOR)
+        self.assertEqual(coord.username, "new.coord@ihelper.kz")  # username == email
         # Пароль не задаётся напрямую — аккаунт создаётся без рабочего пароля.
         self.assertIn("invite_link", response.data)
 
@@ -342,11 +344,13 @@ class PermissionTests(BaseFixture):
         self.auth(self.coordinator)
         response = self.client.post(
             reverse("tutor-list"),
-            {"username": "new.tutor", "full_name": "Новый Тьютор"},
+            {"full_name": "Новый Тьютор", "email": "new.tutor@ihelper.kz"},
         )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
-        self.assertEqual(User.objects.get(username="new.tutor").role, Role.TUTOR)
+        tutor = User.objects.get(email="new.tutor@ihelper.kz")
+        self.assertEqual(tutor.role, Role.TUTOR)
+        self.assertEqual(tutor.username, "new.tutor@ihelper.kz")
         self.assertIn("invite_link", response.data)
 
     def test_anonymous_is_rejected(self):
@@ -674,32 +678,33 @@ class StaffInviteTests(BaseFixture):
         self.auth(self.admin)
         response = self.client.post(
             reverse("coordinator-list"),
-            {"username": "coord.new", "full_name": "Новый Координатор", "email": "c@ihelper.kz"},
+            {"full_name": "Новый Координатор", "email": "c@ihelper.kz"},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertIn("invite_link", response.data)
 
-        # Аккаунт создан, но без рабочего пароля до приёма приглашения.
-        user = User.objects.get(username="coord.new")
+        # Аккаунт создан по email (username == email), без рабочего пароля.
+        user = User.objects.get(email="c@ihelper.kz")
+        self.assertEqual(user.username, "c@ihelper.kz")
         self.assertFalse(user.has_usable_password())
 
         self.client.credentials()  # приём приглашения — анонимно
         self._accept_and_login(
-            response.data["invite_link"], "coord.new", "CoordPass!2026", Role.COORDINATOR
+            response.data["invite_link"], "c@ihelper.kz", "CoordPass!2026", Role.COORDINATOR
         )
 
     def test_coordinator_invites_tutor_end_to_end(self):
         self.auth(self.coordinator)
         response = self.client.post(
             reverse("tutor-list"),
-            {"username": "tutor.new", "full_name": "Новый Тьютор", "email": "t@ihelper.kz"},
+            {"full_name": "Новый Тьютор", "email": "t@ihelper.kz"},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertIn("invite_link", response.data)
 
         self.client.credentials()
         token = self._accept_and_login(
-            response.data["invite_link"], "tutor.new", "TutorPass!2026", Role.TUTOR
+            response.data["invite_link"], "t@ihelper.kz", "TutorPass!2026", Role.TUTOR
         )
 
         # Одноразовость: повторный приём той же ссылки отклоняется.
@@ -713,22 +718,23 @@ class StaffInviteTests(BaseFixture):
     def test_staff_invite_link_points_to_shared_invite_endpoint(self):
         self.auth(self.admin)
         response = self.client.post(
-            reverse("coordinator-list"), {"username": "coord.x", "full_name": "X"}
+            reverse("coordinator-list"),
+            {"full_name": "X", "email": "coord.x@ihelper.kz"},
         )
         # Та же форма ссылки, что и у родителей: {FRONTEND_URL}/invite/<token>.
         self.assertIn("/invite/", response.data["invite_link"])
 
-    def _create_coordinator(self, username):
+    def _create_coordinator(self, email):
         self.auth(self.admin)
         response = self.client.post(
             reverse("coordinator-list"),
-            {"username": username, "full_name": "Пере Выпуск", "email": f"{username}@ihelper.kz"},
+            {"full_name": "Пере Выпуск", "email": email},
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         return response.data
 
     def test_reinvite_regenerates_link_and_invalidates_old_token(self):
-        created = self._create_coordinator("coord.re")
+        created = self._create_coordinator("coord.re@ihelper.kz")
         old_token = self._token_from_link(created["invite_link"])
 
         # Перевыпуск ссылки (аккаунт ещё не активирован).
@@ -745,11 +751,11 @@ class StaffInviteTests(BaseFixture):
 
         # Новый принимается, логин работает, роль верна.
         self._accept_and_login(
-            reinvite.data["invite_link"], "coord.re", "CoordPass!2026", Role.COORDINATOR
+            reinvite.data["invite_link"], "coord.re@ihelper.kz", "CoordPass!2026", Role.COORDINATOR
         )
 
     def test_reinvite_rejected_once_account_active(self):
-        created = self._create_coordinator("coord.act")
+        created = self._create_coordinator("coord.act@ihelper.kz")
         token = self._token_from_link(created["invite_link"])
 
         # Активируем аккаунт (принимаем исходное приглашение).
@@ -770,13 +776,96 @@ class StaffInviteTests(BaseFixture):
         self.auth(self.coordinator)
         created = self.client.post(
             reverse("tutor-list"),
-            {"username": "tutor.re", "full_name": "Тьютор", "email": "tr@ihelper.kz"},
+            {"full_name": "Тьютор", "email": "tr@ihelper.kz"},
         )
         self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
 
         reinvite = self.client.post(reverse("tutor-reinvite", args=[created.data["id"]]))
         self.assertEqual(reinvite.status_code, status.HTTP_200_OK, reinvite.data)
         self.assertIn("invite_link", reinvite.data)
+
+
+class StaffEmailAsUsernameTests(BaseFixture):
+    """Контракт создания сотрудника: username берётся из email, username не шлётся."""
+
+    def setUp(self):
+        super().setUp()
+        self.admin = make_user("root", Role.ADMIN, is_staff=True)
+        self.auth(self.admin)
+
+    def test_create_coordinator_uses_email_as_username(self):
+        response = self.client.post(
+            reverse("coordinator-list"),
+            {"full_name": "Айгерим Ниязова", "email": "a.niyazova@ihelper.kz",
+             "phone": "+7 701 000 00 00"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        user = User.objects.get(email="a.niyazova@ihelper.kz")
+        self.assertEqual(user.username, "a.niyazova@ihelper.kz")  # ровно email
+        self.assertEqual(user.phone, "+7 701 000 00 00")
+        self.assertEqual(response.data["username"], "a.niyazova@ihelper.kz")
+
+    def test_username_in_payload_is_ignored(self):
+        # username не входит в контракт — присланный игнорируется, берётся email.
+        response = self.client.post(
+            reverse("coordinator-list"),
+            {"username": "ignored", "full_name": "Кто-то", "email": "real@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertFalse(User.objects.filter(username="ignored").exists())
+        self.assertEqual(User.objects.get(email="real@ihelper.kz").username, "real@ihelper.kz")
+
+    def test_create_without_email_is_rejected(self):
+        response = self.client.post(
+            reverse("coordinator-list"), {"full_name": "Без Почты"}
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", response.data)
+        self.assertEqual(response.data["email"][0], "Email обязателен.")
+
+    def test_duplicate_email_across_roles_is_rejected(self):
+        # Тьютор с этим email уже есть → координатора с тем же email не создать.
+        self.client.post(
+            reverse("tutor-list"),
+            {"full_name": "Тьютор", "email": "shared@ihelper.kz"},
+        )
+        response = self.client.post(
+            reverse("coordinator-list"),
+            {"full_name": "Координатор", "email": "shared@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data["email"][0], "Пользователь с таким email уже существует."
+        )
+
+    def test_duplicate_email_case_insensitive(self):
+        self.client.post(
+            reverse("coordinator-list"),
+            {"full_name": "Первый", "email": "case@ihelper.kz"},
+        )
+        response = self.client.post(
+            reverse("tutor-list"),
+            {"full_name": "Второй", "email": "CASE@ihelper.kz"},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_email_update_keeps_username_in_sync(self):
+        created = self.client.post(
+            reverse("coordinator-list"),
+            {"full_name": "Смена Почты", "email": "old@ihelper.kz"},
+        )
+        coord_id = created.data["id"]
+
+        patched = self.client.patch(
+            reverse("coordinator-detail", args=[coord_id]),
+            {"email": "new@ihelper.kz"},
+            format="json",
+        )
+        self.assertEqual(patched.status_code, status.HTTP_200_OK, patched.data)
+
+        user = User.objects.get(pk=coord_id)
+        self.assertEqual(user.email, "new@ihelper.kz")
+        self.assertEqual(user.username, "new@ihelper.kz")  # username следует за email
 
 
 class EmailFallbackTests(BaseFixture):
