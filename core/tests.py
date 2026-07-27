@@ -13,7 +13,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from core import emails, services
+from core import emails, serializers as core_serializers, services
+from core.urls import router
 from core.models import (
     Group,
     Journal,
@@ -880,3 +881,63 @@ class EmailFallbackTests(BaseFixture):
         self.assertTrue(ok)
         post.assert_not_called()
         send_mail.assert_called_once()
+
+
+class SerializerConfigTests(APITestCase):
+    """Ловит класс «поле declared на сериализаторе, но нет в Meta.fields».
+
+    DRF строит карту полей лениво — при первом обращении к .fields (т.е. при первом
+    рендере ответа). На пустой БД GET списка может вернуть 200 и НЕ тронуть .fields,
+    поэтому баг всплывает только когда в таблице есть строки. Здесь мы принудительно
+    строим карту полей у каждого ModelSerializer из core.serializers — ошибка
+    вылезает детерминированно, не завися от данных.
+    """
+
+    def test_all_model_serializer_field_maps_build(self):
+        import inspect
+
+        from rest_framework import serializers as drf
+
+        failures = []
+        for name, cls in inspect.getmembers(core_serializers, inspect.isclass):
+            if cls.__module__ != core_serializers.__name__:
+                continue
+            if not issubclass(cls, drf.ModelSerializer):
+                continue
+            try:
+                cls().fields  # noqa: B018 — обращение к .fields запускает get_field_names()
+            except Exception as exc:  # AssertionError и т.п. из построения карты полей
+                failures.append(f"{name}: {exc}")
+
+        self.assertEqual(
+            failures, [], "Некорректная конфигурация Meta.fields:\n" + "\n".join(failures)
+        )
+
+
+class ListEndpointSmokeTests(BaseFixture):
+    """Каждый list-эндпоинт из роутера отвечает не-500 для админа.
+
+    Параметризовано по router.registry — новые вьюсеты попадают под проверку
+    автоматически, руками перечислять не нужно. Часть эндпоинтов на фикстуре
+    BaseFixture уже с данными (координаторы, тьюторы, ученики, группы, журналы),
+    так что для них сериализация реально прогоняется на строках; остальной класс
+    ошибок ловит SerializerConfigTests.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.admin = make_user("root@ihelper.kz", Role.ADMIN, is_staff=True)
+
+    def test_all_list_endpoints_do_not_500(self):
+        self.auth(self.admin)
+        checked = []
+        for _prefix, _viewset, basename in router.registry:
+            url = reverse(f"{basename}-list")
+            response = self.client.get(url)
+            self.assertLess(
+                response.status_code, 500, f"{basename}-list вернул {response.status_code}"
+            )
+            checked.append(basename)
+
+        # Санити: роутер действительно обошли и /api/tests/ (регресс из этой задачи) в нём.
+        self.assertIn("test", checked)

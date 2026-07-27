@@ -371,6 +371,7 @@ class TestSerializer(serializers.ModelSerializer):
             "test_type",
             "test_type_display",
             "subject",
+            "subject_name",
             "group",
             "date",
             "max_score",
