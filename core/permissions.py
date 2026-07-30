@@ -76,6 +76,24 @@ class IsAdminOrCoordinatorOrReadOnly(BasePermission):
         return user.is_admin or user.is_coordinator
 
 
+class IsAdminOrReadOnly(BasePermission):
+    """Писать может только админ; остальные аутентифицированные — читать.
+
+    Для общей базы материалов: её курирует администратор на всю организацию,
+    координаторы только читают.
+    """
+
+    message = "Изменять эти данные может только администратор."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if request.method in SAFE_METHODS:
+            return True
+        return user.is_admin
+
+
 class RolePermission(BasePermission):
     """Разрешает метод, если роль есть в карте прав вьюсета.
 

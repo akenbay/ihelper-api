@@ -25,25 +25,29 @@ from . import services
 from .emails import send_password_reset_email
 from .models import (
     Coordinator,
-    Group,
     Invite,
     LessonReport,
     Material,
     Role,
-    Student,
     Subject,
-    Test,
     TestResult,
-    Tutor,
     User,
 )
 from .permissions import (
     IsAdmin,
     IsAdminOrCoordinator,
     IsAdminOrCoordinatorOrReadOnly,
+    IsAdminOrReadOnly,
     RolePermission,
 )
-from .scoping import scoped_journals, scoped_schedule_entries, scoped_students
+from .scoping import (
+    scoped_groups,
+    scoped_journals,
+    scoped_schedule_entries,
+    scoped_students,
+    scoped_tests,
+    scoped_tutors,
+)
 from .serializers import (
     CoordinatorSerializer,
     GroupSerializer,
@@ -204,12 +208,19 @@ class StaffInviteCreateMixin:
     В ответ на создание кладём invite_link, чтобы админ/координатор скопировал
     ссылку и передал её вручную (письмо этим ролям пока не шлём). Пароль сотрудник
     задаёт по ссылке через /api/auth/invite/accept.
+
+    organization и owner ставятся автоматически из создателя и из запроса НЕ
+    принимаются. owns_created=True → создаваемый аккаунт принадлежит создателю-
+    координатору (тьютор). Аккаунт, созданный админом, имеет owner=None.
     """
+
+    owns_created = False
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
+        owner = request.user if (self.owns_created and request.user.is_coordinator) else None
+        user = serializer.save(organization=request.user.organization, owner=owner)
         _invite, raw_token = services.create_staff_invite(user, created_by=request.user)
 
         data = dict(serializer.data)
@@ -250,22 +261,33 @@ class CoordinatorViewSet(StaffInviteCreateMixin, viewsets.ModelViewSet):
     POST возвращает поля координатора + invite_link.
     """
 
-    queryset = Coordinator.objects.all().order_by("full_name")
     serializer_class = CoordinatorSerializer
     permission_classes = [IsAdmin]
     search_fields = ["full_name", "username", "email"]
+    # Координатор не «принадлежит» другому координатору — owner всегда None.
+    owns_created = False
+
+    def get_queryset(self):
+        # Только админ доходит сюда; видит координаторов своей организации.
+        return Coordinator.objects.filter(
+            organization=self.request.user.organization
+        ).order_by("full_name")
 
 
 class TutorViewSet(StaffInviteCreateMixin, viewsets.ModelViewSet):
     """/api/tutors/ — координатор (и админ) создаёт и удаляет тьюторов.
 
-    POST возвращает поля тьютора + invite_link.
+    POST возвращает поля тьютора + invite_link. Тьютор, созданный координатором,
+    принадлежит ему (owner). Админ видит всех тьюторов своей организации.
     """
 
-    queryset = Tutor.objects.all().order_by("full_name")
     serializer_class = TutorSerializer
     permission_classes = [IsAdminOrCoordinator]
     search_fields = ["full_name", "username", "email", "phone"]
+    owns_created = True
+
+    def get_queryset(self):
+        return scoped_tutors(self.request.user).order_by("full_name")
 
 
 # --- Ученики, справочники ----------------------------------------------
@@ -287,7 +309,13 @@ class StudentViewSet(viewsets.ModelViewSet):
         return scoped_students(self.request.user)
 
     def perform_create(self, serializer):
-        student = serializer.save(created_by=self.request.user)
+        # organization и owner ставятся из создателя, из запроса НЕ принимаются.
+        # Ученик, созданный админом, имеет owner=None (виден только админу орг-ии).
+        user = self.request.user
+        owner = user if user.is_coordinator else None
+        student = serializer.save(
+            created_by=user, organization=user.organization, owner=owner
+        )
         # Приглашение НЕ отправляется при создании (по дизайну — отдельная ручка
         # invite_parent). Отметим в логе случай без parent_email: пригласить
         # родителя будет нельзя, пока email не проставят.
@@ -315,20 +343,29 @@ class StudentViewSet(viewsets.ModelViewSet):
 
 
 class SubjectViewSet(viewsets.ModelViewSet):
-    """/api/subjects/ — управляет координатор, читают все."""
+    """/api/subjects/ — управляет координатор, читают все (в своей организации)."""
 
-    queryset = Subject.objects.all()
     serializer_class = SubjectSerializer
     permission_classes = [IsAdminOrCoordinatorOrReadOnly]
     search_fields = ["name"]
 
+    def get_queryset(self):
+        # Предметы шарятся внутри организации, но не между организациями.
+        return Subject.objects.filter(organization=self.request.user.organization)
+
+    def perform_create(self, serializer):
+        serializer.save(organization=self.request.user.organization)
+
 
 class MaterialViewSet(viewsets.ModelViewSet):
-    """/api/materials/ — база материалов. Тьютор читает, координатор наполняет."""
+    """/api/materials/ — общая база материалов организации.
 
-    queryset = Material.objects.select_related("subject")
+    Организация-скоуп есть, координатор-скоупа НЕТ: база общая на всю организацию.
+    Курирует её админ (запись только админ), читают все, кроме родителей.
+    """
+
     serializer_class = MaterialSerializer
-    permission_classes = [IsAdminOrCoordinatorOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
     filterset_fields = ["subject", "grade"]
     search_fields = ["title", "description"]
 
@@ -336,7 +373,12 @@ class MaterialViewSet(viewsets.ModelViewSet):
         # Родителю база материалов не нужна.
         if self.request.user.is_parent:
             return Material.objects.none()
-        return super().get_queryset()
+        return Material.objects.filter(
+            organization=self.request.user.organization
+        ).select_related("subject")
+
+    def perform_create(self, serializer):
+        serializer.save(organization=self.request.user.organization)
 
 
 # --- Группы -------------------------------------------------------------
@@ -356,15 +398,14 @@ class GroupViewSet(viewsets.ModelViewSet):
     search_fields = ["name"]
 
     def get_queryset(self):
+        return scoped_groups(self.request.user)
+
+    def perform_create(self, serializer):
+        # organization + owner из создателя; из запроса не принимаются. Группа,
+        # созданная админом, имеет owner=None (видна только админу орг-ии).
         user = self.request.user
-        qs = Group.objects.select_related("tutor").prefetch_related("subjects", "students")
-        if user.is_admin or user.is_coordinator:
-            return qs
-        if user.is_tutor:
-            return qs.filter(tutor=user)
-        if user.is_parent:
-            return qs.filter(students__in=user.children.all()).distinct()
-        return qs.none()
+        owner = user if user.is_coordinator else None
+        serializer.save(organization=user.organization, owner=owner)
 
     @action(detail=True, methods=["get"])
     def journals(self, request, pk=None):
@@ -434,18 +475,15 @@ class LessonReportViewSet(viewsets.ModelViewSet):
 class TestViewSet(viewsets.ModelViewSet):
     """/api/tests/ — тесты (входной / промежуточный / итоговый). Заводит координатор."""
 
-    queryset = Test.objects.select_related("subject", "group")
     serializer_class = TestSerializer
     permission_classes = [IsAdminOrCoordinatorOrReadOnly]
     filterset_fields = ["test_type", "subject", "group"]
 
     def get_queryset(self):
-        user = self.request.user
-        if user.is_tutor:
-            return super().get_queryset().filter(group__tutor=user)
-        if user.is_parent:
-            return super().get_queryset().filter(group__students__in=user.children.all()).distinct()
-        return super().get_queryset()
+        return scoped_tests(self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(organization=self.request.user.organization)
 
 
 class TestResultViewSet(viewsets.ModelViewSet):
@@ -482,7 +520,9 @@ class ScheduleEntryViewSet(viewsets.ModelViewSet):
         return scoped_schedule_entries(self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save(
+            created_by=self.request.user, organization=self.request.user.organization
+        )
 
 
 # --- Приглашения родителей ---------------------------------------------
@@ -501,14 +541,20 @@ class ParentInviteViewSet(
     на /api/coordinators/ и /api/tutors/).
     """
 
-    queryset = Invite.objects.filter(role=Role.PARENT).select_related("student")
     serializer_class = ParentInviteSerializer
     permission_classes = [IsAdminOrCoordinator]
     filterset_fields = ["student", "email"]
 
+    def get_queryset(self):
+        # Приглашения родителей ограничены видимыми ученикам (та же изоляция).
+        return Invite.objects.filter(
+            role=Role.PARENT, student__in=scoped_students(self.request.user)
+        ).select_related("student")
+
     def create(self, request, *args, **kwargs):
+        # Создавать приглашение можно только для ученика в своей области видимости.
         student_id = request.data.get("student")
-        student = Student.objects.filter(pk=student_id).first()
+        student = scoped_students(request.user).filter(pk=student_id).first()
         if student is None:
             return Response(
                 {"student": "Ученик не найден."}, status=status.HTTP_400_BAD_REQUEST

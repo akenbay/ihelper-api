@@ -16,6 +16,7 @@ from core.models import (
     Journal,
     LessonReport,
     Material,
+    Organization,
     Role,
     ScheduleEntry,
     Student,
@@ -67,23 +68,47 @@ class Command(BaseCommand):
 
         self.stdout.write("Создаю демо-данные…")
 
+        # Две организации; у каждой свой админ. Демо-данные — под CLA.
+        cla, _ = Organization.objects.get_or_create(name="CLA")
+        rks, _ = Organization.objects.get_or_create(name="RKS")
+
         admin = self._user(
-            "admin", "Админ Администраторов", Role.ADMIN, is_staff=True, is_superuser=True
+            "admin", "Админ Администраторов", Role.ADMIN,
+            organization=cla, is_staff=True, is_superuser=True,
+        )
+        # Админ второй организации — данных у RKS почти нет, важна изоляция.
+        self._user(
+            "admin.rks", "Админ RKS", Role.ADMIN,
+            organization=rks, is_staff=True, is_superuser=True,
         )
 
         coordinators = [
-            self._user("a.nurpeisova", "Айгерим Нурпеисова", Role.COORDINATOR, phone="+7 701 111 22 33"),
-            self._user("d.sagyndyk", "Данияр Сагындык", Role.COORDINATOR, phone="+7 701 222 33 44"),
+            self._user("a.nurpeisova", "Айгерим Нурпеисова", Role.COORDINATOR,
+                       organization=cla, phone="+7 701 111 22 33"),
+            self._user("d.sagyndyk", "Данияр Сагындык", Role.COORDINATOR,
+                       organization=cla, phone="+7 701 222 33 44"),
         ]
+        owner = coordinators[0]  # владелец демо-тьюторов/учеников/групп
 
         tutors = [
-            self._user("m.abenov", "Мадияр Абенов", Role.TUTOR, phone="+7 705 333 44 55"),
-            self._user("z.karimova", "Зарина Каримова", Role.TUTOR, phone="+7 705 444 55 66"),
-            self._user("t.zhaksylyk", "Тимур Жаксылык", Role.TUTOR, phone="+7 705 555 66 77"),
+            self._user("m.abenov", "Мадияр Абенов", Role.TUTOR,
+                       organization=cla, owner=owner, phone="+7 705 333 44 55"),
+            self._user("z.karimova", "Зарина Каримова", Role.TUTOR,
+                       organization=cla, owner=owner, phone="+7 705 444 55 66"),
+            self._user("t.zhaksylyk", "Тимур Жаксылык", Role.TUTOR,
+                       organization=cla, owner=owner, phone="+7 705 555 66 77"),
         ]
 
-        math, _ = Subject.objects.get_or_create(name="Математика")
-        english, _ = Subject.objects.get_or_create(name="Английский язык")
+        # Немного данных под RKS — чтобы изоляция была видна в демо.
+        rks_coord = self._user("g.rks", "Гаухар Ержанова", Role.COORDINATOR, organization=rks)
+        Student.objects.get_or_create(
+            full_name="Ерлан Досжанов (RKS)",
+            defaults={"grade": "7", "organization": rks, "owner": rks_coord,
+                      "created_by": rks_coord},
+        )
+
+        math, _ = Subject.objects.get_or_create(name="Математика", organization=cla)
+        english, _ = Subject.objects.get_or_create(name="Английский язык", organization=cla)
 
         students_data = [
             ("Алишер Бекжанов", "5", "русский", "SVC-1: малообеспеченная семья",
@@ -110,15 +135,19 @@ class Command(BaseCommand):
                     "parent_name": p_name,
                     "parent_phone": p_phone,
                     "parent_email": p_email,
-                    "created_by": coordinators[0],
+                    "created_by": owner,
+                    "organization": cla,
+                    "owner": owner,
                 },
             )
             students.append(student)
 
         # «Группа 5А» — математика + английский → по 2 журнала на ученика.
-        group_5a = self._group("Группа 5А", "5", "русский", tutors[0], [math, english], students[:3])
+        group_5a = self._group("Группа 5А", "5", "русский", tutors[0],
+                               [math, english], students[:3], cla, owner)
         # «Группа 6Б» — только математика → по 1 журналу на ученика.
-        group_6b = self._group("Группа 6Б", "6", "казахский", tutors[1], [math], students[3:])
+        group_6b = self._group("Группа 6Б", "6", "казахский", tutors[1],
+                               [math], students[3:], cla, owner)
 
         self.stdout.write(f"  журналов создано: {Journal.objects.count()}")
 
@@ -140,6 +169,7 @@ class Command(BaseCommand):
             students[0].parent_email,
             students[0].parent_name,
             Role.PARENT,
+            organization=students[0].organization,
             phone=students[0].parent_phone,
             email=students[0].parent_email,
         )
@@ -160,7 +190,8 @@ class Command(BaseCommand):
         for title, desc, subject, grade, link in materials:
             Material.objects.get_or_create(
                 title=title,
-                defaults={"description": desc, "subject": subject, "grade": grade, "link": link},
+                defaults={"description": desc, "subject": subject, "grade": grade,
+                          "link": link, "organization": cla},
             )
 
         self._report(admin, coordinators, tutors, parent)
@@ -180,13 +211,15 @@ class Command(BaseCommand):
             user.save()
         return user
 
-    def _group(self, name, grade, language, tutor, subjects, students):
+    def _group(self, name, grade, language, tutor, subjects, students, organization, owner):
         group, _ = Group.objects.get_or_create(
             name=name,
             defaults={
                 "grade": grade,
                 "language": language,
                 "tutor": tutor,
+                "organization": organization,
+                "owner": owner,
                 "start_date": timezone.localdate() - timedelta(days=60),
             },
         )
@@ -204,7 +237,7 @@ class Command(BaseCommand):
                     subject=subject,
                     date=start + timedelta(days=week * 7 + subject_index * 2),
                     time=time(15, 0) if subject_index == 0 else time(16, 30),
-                    defaults={"comment": ""},
+                    defaults={"comment": "", "organization": group.organization},
                 )
         # Пример переноса: изменение фиксируется комментарием, а не правкой даты.
         entry = group.schedule_entries.order_by("date").last()
@@ -227,6 +260,7 @@ class Command(BaseCommand):
                     "test_type": test_type,
                     "subject": subject,
                     "group": group,
+                    "organization": group.organization,
                     "date": timezone.localdate() + timedelta(days=day_offset),
                     "max_score": 100,
                 },

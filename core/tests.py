@@ -20,6 +20,7 @@ from core.models import (
     Journal,
     LessonReport,
     Material,
+    Organization,
     Role,
     ScheduleEntry,
     Student,
@@ -31,7 +32,16 @@ from core.models import (
 )
 
 
+def default_org():
+    org, _ = Organization.objects.get_or_create(name="CLA")
+    return org
+
+
 def make_user(username, role, **extra):
+    # organization обязателен (NOT NULL). По умолчанию — общая тестовая орг CLA,
+    # чтобы большинство тестов не передавали её явно. Явный organization/owner в
+    # extra перекрывает дефолт.
+    extra.setdefault("organization", default_org())
     user = User.objects.create(username=username, role=role, full_name=username, **extra)
     user.set_password("StrongPass!2024")
     user.save()
@@ -40,23 +50,40 @@ def make_user(username, role, **extra):
 
 class BaseFixture(APITestCase):
     def setUp(self):
+        self.org = default_org()
         self.coordinator = make_user("coord", Role.COORDINATOR)
-        self.tutor = make_user("tutor1", Role.TUTOR)
-        self.other_tutor = make_user("tutor2", Role.TUTOR)
+        # Тьюторы принадлежат координатору (второй уровень изоляции).
+        self.tutor = make_user("tutor1", Role.TUTOR, owner=self.coordinator)
+        self.other_tutor = make_user("tutor2", Role.TUTOR, owner=self.coordinator)
 
-        self.math = Subject.objects.create(name="Математика")
-        self.english = Subject.objects.create(name="Английский язык")
+        self.math = self.make_subject(name="Математика")
+        self.english = self.make_subject(name="Английский язык")
 
-        self.alisher = Student.objects.create(
+        self.alisher = self.make_student(
             full_name="Алишер Бекжанов", grade="5", parent_email="parent1@example.kz"
         )
-        self.aruzhan = Student.objects.create(
+        self.aruzhan = self.make_student(
             full_name="Аружан Сериккызы", grade="5", parent_email="parent2@example.kz"
         )
 
-        self.group = Group.objects.create(name="Группа 5А", grade="5", tutor=self.tutor)
+        self.group = self.make_group(name="Группа 5А", grade="5", tutor=self.tutor)
         self.group.subjects.set([self.math, self.english])
         self.group.students.set([self.alisher, self.aruzhan])
+
+    # Фабрики с дефолтами organization/owner, чтобы не повторять их в каждом тесте.
+    def make_subject(self, **kw):
+        kw.setdefault("organization", self.org)
+        return Subject.objects.create(**kw)
+
+    def make_student(self, **kw):
+        kw.setdefault("organization", self.org)
+        kw.setdefault("owner", self.coordinator)
+        return Student.objects.create(**kw)
+
+    def make_group(self, **kw):
+        kw.setdefault("organization", self.org)
+        kw.setdefault("owner", self.coordinator)
+        return Group.objects.create(**kw)
 
     def auth(self, user):
         self.client.force_authenticate(user=user)
@@ -69,8 +96,8 @@ class AutoJournalTests(BaseFixture):
         self.assertEqual(self.alisher.journals.count(), 2)
 
     def test_single_subject_group_creates_one_journal_per_student(self):
-        group = Group.objects.create(name="Группа 6Б", grade="6", tutor=self.other_tutor)
-        student = Student.objects.create(full_name="Диана Аманжолова", grade="6")
+        group = self.make_group(name="Группа 6Б", grade="6", tutor=self.other_tutor)
+        student = self.make_student(full_name="Диана Аманжолова", grade="6")
         group.subjects.set([self.math])
         group.students.set([student])
 
@@ -78,13 +105,13 @@ class AutoJournalTests(BaseFixture):
         self.assertEqual(student.journals.first().subject, self.math)
 
     def test_adding_student_later_creates_journals(self):
-        new_student = Student.objects.create(full_name="Ерасыл Токтаров", grade="5")
+        new_student = self.make_student(full_name="Ерасыл Токтаров", grade="5")
         self.group.students.add(new_student)
 
         self.assertEqual(new_student.journals.count(), 2)
 
     def test_adding_subject_later_creates_journals_for_all_students(self):
-        physics = Subject.objects.create(name="Физика")
+        physics = self.make_subject(name="Физика")
         self.group.subjects.add(physics)
 
         self.assertEqual(Journal.objects.filter(group=self.group, subject=physics).count(), 2)
@@ -119,7 +146,8 @@ class FinalGradeTests(BaseFixture):
         super().setUp()
         self.journal = Journal.objects.get(student=self.alisher, subject=self.math)
         self.entry = ScheduleEntry.objects.create(
-            group=self.group, subject=self.math, date=timezone.localdate(), time=time(15, 0)
+            group=self.group, subject=self.math, date=timezone.localdate(),
+            time=time(15, 0), organization=self.org,
         )
 
     def _lesson(self, lesson_grade, homework_grade):
@@ -142,6 +170,7 @@ class FinalGradeTests(BaseFixture):
             subject=self.math,
             group=self.group,
             max_score=max_score,
+            organization=self.org,
         )
         return TestResult.objects.create(journal=self.journal, test=test, score=score)
 
@@ -203,7 +232,8 @@ class LessonReportApiTests(BaseFixture):
         super().setUp()
         self.journal = Journal.objects.get(student=self.alisher, subject=self.math)
         self.entry = ScheduleEntry.objects.create(
-            group=self.group, subject=self.math, date=timezone.localdate(), time=time(15, 0)
+            group=self.group, subject=self.math, date=timezone.localdate(),
+            time=time(15, 0), organization=self.org,
         )
         self.url = reverse("lessonreport-list")
 
@@ -304,8 +334,8 @@ class PermissionTests(BaseFixture):
         )
 
     def test_tutor_sees_only_students_from_own_groups(self):
-        far_student = Student.objects.create(full_name="Чужой Ученик", grade="7")
-        other_group = Group.objects.create(name="Группа 7В", tutor=self.other_tutor)
+        far_student = self.make_student(full_name="Чужой Ученик", grade="7")
+        other_group = self.make_group(name="Группа 7В", tutor=self.other_tutor)
         other_group.subjects.set([self.math])
         other_group.students.set([far_student])
 
@@ -517,7 +547,9 @@ class AuthTests(BaseFixture):
         self.assertEqual(response.data["role"], "tutor")
 
     def test_superuser_without_role_reports_admin(self):
-        root = User.objects.create(username="root", is_superuser=True, is_staff=True, role="")
+        root = User.objects.create(
+            username="root", is_superuser=True, is_staff=True, role="", organization=self.org
+        )
         root.set_password("StrongPass!2024")
         root.save()
 
@@ -529,12 +561,14 @@ class AuthTests(BaseFixture):
 class MaterialTests(BaseFixture):
     def setUp(self):
         super().setUp()
+        self.admin = make_user("mat.admin", Role.ADMIN, is_staff=True)
         self.material = Material.objects.create(
             title="Сборник задач по алгебре",
             subject=self.math,
             grade="5",
             link="https://materials.ihelper.kz/math/5/tasks.pdf",
             description="Задачи для отработки.",
+            organization=self.org,
         )
 
     def test_tutor_can_read_materials_with_link_field(self):
@@ -547,22 +581,34 @@ class MaterialTests(BaseFixture):
         self.assertEqual(row["link"], "https://materials.ihelper.kz/math/5/tasks.pdf")
 
     def test_materials_filterable_by_grade_and_subject(self):
-        Material.objects.create(title="Английский, 6 класс", subject=self.english, grade="6")
+        Material.objects.create(
+            title="Английский, 6 класс", subject=self.english, grade="6",
+            organization=self.org,
+        )
         self.auth(self.tutor)
 
         response = self.client.get(reverse("material-list"), {"grade": "5", "subject": self.math.id})
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["title"], "Сборник задач по алгебре")
 
-    def test_coordinator_can_create_material(self):
+    def test_admin_creates_material_but_coordinator_cannot(self):
+        # База материалов курируется админом (изменение с Admin+Coordinator на Admin-only).
         self.auth(self.coordinator)
-        response = self.client.post(
+        forbidden = self.client.post(
+            reverse("material-list"),
+            {"title": "Нельзя координатору", "subject": self.math.id, "grade": "5"},
+            format="json",
+        )
+        self.assertEqual(forbidden.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.auth(self.admin)
+        created = self.client.post(
             reverse("material-list"),
             {"title": "Новый материал", "subject": self.math.id, "grade": "5",
              "link": "https://materials.ihelper.kz/x.pdf"},
             format="json",
         )
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
 
     def test_tutor_cannot_create_material(self):
         self.auth(self.tutor)
@@ -941,3 +987,232 @@ class ListEndpointSmokeTests(BaseFixture):
 
         # Санити: роутер действительно обошли и /api/tests/ (регресс из этой задачи) в нём.
         self.assertIn("test", checked)
+
+
+class TwoOrgFixture(APITestCase):
+    """Две организации (CLA, RKS); в CLA — два координатора со своими данными.
+
+    Проверяет оба уровня изоляции: между организациями и между координаторами
+    внутри организации.
+    """
+
+    def setUp(self):
+        # get_or_create, а не create: организацию "CLA" уже создаёт data-миграция 0003
+        # (бэкфилл), поэтому в тестовой БД она есть с самого начала.
+        self.cla, _ = Organization.objects.get_or_create(name="CLA")
+        self.rks, _ = Organization.objects.get_or_create(name="RKS")
+
+        # --- CLA ---
+        self.cla_admin = make_user("cla.admin", Role.ADMIN, organization=self.cla, is_staff=True)
+        self.coord_a = make_user("coord.a", Role.COORDINATOR, organization=self.cla)
+        self.coord_b = make_user("coord.b", Role.COORDINATOR, organization=self.cla)
+        self.tutor_a = make_user("tutor.a", Role.TUTOR, organization=self.cla, owner=self.coord_a)
+        self.tutor_b = make_user("tutor.b", Role.TUTOR, organization=self.cla, owner=self.coord_b)
+
+        self.subj = Subject.objects.create(name="Математика", organization=self.cla)
+
+        self.student_a = Student.objects.create(
+            full_name="A ученик", grade="5", organization=self.cla, owner=self.coord_a
+        )
+        self.student_b = Student.objects.create(
+            full_name="B ученик", grade="5", organization=self.cla, owner=self.coord_b
+        )
+
+        self.group_a = Group.objects.create(
+            name="Группа A", tutor=self.tutor_a, organization=self.cla, owner=self.coord_a
+        )
+        self.group_a.subjects.set([self.subj])
+        self.group_a.students.set([self.student_a])
+        self.group_b = Group.objects.create(
+            name="Группа B", tutor=self.tutor_b, organization=self.cla, owner=self.coord_b
+        )
+        self.group_b.subjects.set([self.subj])
+        self.group_b.students.set([self.student_b])
+
+        self.material_cla = Material.objects.create(title="CLA материал", organization=self.cla)
+
+        # --- RKS ---
+        self.rks_admin = make_user("rks.admin", Role.ADMIN, organization=self.rks, is_staff=True)
+        self.coord_r = make_user("coord.r", Role.COORDINATOR, organization=self.rks)
+        # Тот же name, другая организация — проверяет unique(name, organization).
+        self.subj_r = Subject.objects.create(name="Математика", organization=self.rks)
+        self.student_r = Student.objects.create(
+            full_name="R ученик", grade="7", organization=self.rks, owner=self.coord_r
+        )
+        self.material_rks = Material.objects.create(title="RKS материал", organization=self.rks)
+
+    def auth(self, user):
+        self.client.force_authenticate(user=user)
+
+    def names(self, response):
+        return {row["full_name"] for row in response.data["results"]}
+
+
+class CoordinatorOwnershipIsolationTests(TwoOrgFixture):
+    """Внутри организации координатор видит только свои строки."""
+
+    def test_coordinator_sees_only_own_students(self):
+        self.auth(self.coord_a)
+        resp = self.client.get(reverse("student-list"))
+        self.assertEqual(self.names(resp), {"A ученик"})
+
+    def test_coordinator_cannot_open_other_coordinators_student(self):
+        self.auth(self.coord_a)
+        resp = self.client.get(reverse("student-detail", args=[self.student_b.id]))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_coordinator_sees_only_own_tutors(self):
+        self.auth(self.coord_a)
+        resp = self.client.get(reverse("tutor-list"))
+        ids = {row["id"] for row in resp.data["results"]}
+        self.assertEqual(ids, {self.tutor_a.id})
+        detail = self.client.get(reverse("tutor-detail", args=[self.tutor_b.id]))
+        self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_coordinator_sees_only_own_groups(self):
+        self.auth(self.coord_a)
+        resp = self.client.get(reverse("group-list"))
+        self.assertEqual({row["name"] for row in resp.data["results"]}, {"Группа A"})
+        detail = self.client.get(reverse("group-detail", args=[self.group_b.id]))
+        self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_coordinator_cannot_see_other_coordinators_journals(self):
+        self.auth(self.coord_a)
+        resp = self.client.get(reverse("journal-list"))
+        student_names = {row["student_name"] for row in resp.data["results"]}
+        self.assertEqual(student_names, {"A ученик"})
+
+    def test_admin_sees_all_coordinators_data_in_org(self):
+        self.auth(self.cla_admin)
+        resp = self.client.get(reverse("student-list"))
+        self.assertEqual(self.names(resp), {"A ученик", "B ученик"})
+        # Оба тьютора и обе группы видны админу.
+        tutors = {row["id"] for row in self.client.get(reverse("tutor-list")).data["results"]}
+        self.assertEqual(tutors, {self.tutor_a.id, self.tutor_b.id})
+
+    def test_admin_created_row_has_no_owner_and_is_admin_only(self):
+        self.auth(self.cla_admin)
+        created = self.client.post(
+            reverse("student-list"), {"full_name": "Админский", "grade": "5"}
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        student = Student.objects.get(full_name="Админский")
+        self.assertIsNone(student.owner)
+        self.assertEqual(student.organization, self.cla)
+
+        # Координатор его НЕ видит (owner пуст), админ — видит.
+        self.auth(self.coord_a)
+        self.assertEqual(
+            self.client.get(reverse("student-detail", args=[student.id])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.auth(self.cla_admin)
+        self.assertEqual(
+            self.client.get(reverse("student-detail", args=[student.id])).status_code,
+            status.HTTP_200_OK,
+        )
+
+    def test_creation_sets_org_and_owner_ignoring_payload(self):
+        # organization/owner нельзя задать из запроса — берутся из создателя.
+        self.auth(self.coord_a)
+        created = self.client.post(
+            reverse("student-list"),
+            {"full_name": "Подделка", "grade": "5",
+             "organization": self.rks.id, "owner": self.coord_b.id},
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED, created.data)
+        student = Student.objects.get(full_name="Подделка")
+        self.assertEqual(student.organization, self.cla)  # орг создателя, не из payload
+        self.assertEqual(student.owner, self.coord_a)  # создатель, не из payload
+
+
+class OrganizationIsolationTests(TwoOrgFixture):
+    """Данные разных организаций взаимно невидимы — включая администратора."""
+
+    def test_cla_admin_cannot_see_rks_students(self):
+        self.auth(self.cla_admin)
+        resp = self.client.get(reverse("student-list"))
+        self.assertEqual(self.names(resp), {"A ученик", "B ученик"})
+        self.assertNotIn("R ученик", self.names(resp))
+
+    def test_cla_admin_cannot_open_rks_student_by_id(self):
+        self.auth(self.cla_admin)
+        resp = self.client.get(reverse("student-detail", args=[self.student_r.id]))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_cla_admin_cannot_see_rks_coordinators(self):
+        self.auth(self.cla_admin)
+        ids = {row["id"] for row in self.client.get(reverse("coordinator-list")).data["results"]}
+        self.assertIn(self.coord_a.id, ids)
+        self.assertIn(self.coord_b.id, ids)
+        self.assertNotIn(self.coord_r.id, ids)
+
+    def test_rks_admin_isolated_from_cla(self):
+        self.auth(self.rks_admin)
+        resp = self.client.get(reverse("student-list"))
+        self.assertEqual(self.names(resp), {"R ученик"})
+        self.assertEqual(
+            self.client.get(reverse("student-detail", args=[self.student_a.id])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_coordinator_cannot_reference_cross_org_on_create(self):
+        # Координатор RKS не может создать группу с тьютором/учеником из CLA.
+        self.auth(self.coord_r)
+        resp = self.client.post(
+            reverse("group-list"),
+            {"name": "Кросс", "tutor": self.tutor_a.id,
+             "subjects": [self.subj_r.id], "students": [self.student_a.id]},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TutorParentOrgScopingTests(TwoOrgFixture):
+    """Тьютор и родитель — прежнее поведение, но ограничено организацией."""
+
+    def test_tutor_sees_only_own_group_students_within_org(self):
+        self.auth(self.tutor_a)
+        resp = self.client.get(reverse("student-list"))
+        self.assertEqual(self.names(resp), {"A ученик"})
+        # Ни ученика другого тьютора, ни ученика другой организации.
+        for sid in (self.student_b.id, self.student_r.id):
+            self.assertEqual(
+                self.client.get(reverse("student-detail", args=[sid])).status_code,
+                status.HTTP_404_NOT_FOUND,
+            )
+
+    def test_parent_sees_only_own_child_within_org(self):
+        parent = make_user("par.a", Role.PARENT, organization=self.cla)
+        parent.children.add(self.student_a)
+        self.auth(parent)
+        resp = self.client.get(reverse("journal-list"))
+        self.assertTrue({row["student_name"] for row in resp.data["results"]} <= {"A ученик"})
+
+
+class MaterialOrgSharedTests(TwoOrgFixture):
+    """Материалы: общие в пределах организации, изолированы между организациями."""
+
+    def test_both_coordinators_see_org_materials(self):
+        for coord in (self.coord_a, self.coord_b):
+            self.auth(coord)
+            resp = self.client.get(reverse("material-list"))
+            titles = {row["title"] for row in resp.data["results"]}
+            self.assertEqual(titles, {"CLA материал"})
+
+    def test_materials_isolated_across_orgs(self):
+        self.auth(self.coord_r)
+        titles = {row["title"] for row in self.client.get(reverse("material-list")).data["results"]}
+        self.assertEqual(titles, {"RKS материал"})
+
+    def test_material_write_is_admin_only(self):
+        self.auth(self.coord_a)
+        self.assertEqual(
+            self.client.post(reverse("material-list"), {"title": "X"}).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.auth(self.cla_admin)
+        self.assertEqual(
+            self.client.post(reverse("material-list"), {"title": "Y"}).status_code,
+            status.HTTP_201_CREATED,
+        )

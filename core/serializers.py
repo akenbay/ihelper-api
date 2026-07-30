@@ -22,7 +22,13 @@ from .models import (
     Tutor,
     User,
 )
-from .scoping import scoped_journals, scoped_schedule_entries
+from .scoping import (
+    scoped_journals,
+    scoped_schedule_entries,
+    scoped_students,
+    scoped_subjects,
+    scoped_tutors,
+)
 
 # --- Auth ---------------------------------------------------------------
 
@@ -224,6 +230,17 @@ class GroupSerializer(serializers.ModelSerializer):
     tutor_name = serializers.CharField(source="tutor.full_name", read_only=True)
     subject_names = serializers.SerializerMethodField()
     students_count = serializers.SerializerMethodField()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Ссылаться при создании/изменении группы можно только на своих тьютора и
+        # учеников и на предметы своей организации — иначе координатор мог бы
+        # собрать группу из чужих (в т.ч. из другой организации) сущностей.
+        request = self.context.get("request")
+        if request is not None and request.user.is_authenticated:
+            self.fields["tutor"].queryset = scoped_tutors(request.user)
+            self.fields["students"].child_relation.queryset = scoped_students(request.user)
+            self.fields["subjects"].child_relation.queryset = scoped_subjects(request.user)
 
     class Meta:
         model = Group

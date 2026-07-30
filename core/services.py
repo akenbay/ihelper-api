@@ -186,6 +186,9 @@ def _accept_parent_invite(invite, password, full_name):
             role=Role.PARENT,
             full_name=full_name or invite.student.parent_name or "",
             phone=invite.student.parent_phone or "",
+            # Родитель принадлежит организации своего ребёнка (owner не задаётся —
+            # родители не принадлежат координатору).
+            organization=invite.student.organization,
         )
         parent.set_password(password)
         parent.save()

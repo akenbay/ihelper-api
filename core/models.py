@@ -37,12 +37,13 @@ def grade_validators():
 
 
 class Organization(models.Model):
-    """Задел на будущее: вторая организация (СДФ) с изолированными данными.
+    """Организация (CLA, RKS). Верхний уровень изоляции данных.
 
-    Сейчас не используется — все записи создаются с organization=None.
-    Когда организаций станет две: проставить organization пользователям, ученикам,
-    группам и предметам, после чего фильтровать queryset'ы во вьюсетах по
-    request.user.organization (см. пометки ORG-SCOPE в core/views.py).
+    Каждый пользователь и каждая доменная запись принадлежит ровно одной
+    организации. Данные разных организаций взаимно невидимы для ВСЕХ ролей,
+    включая администратора (см. фильтрацию по organization в core/scoping.py и
+    get_queryset вьюсетов). Второй уровень изоляции — владелец-координатор
+    (поле owner) внутри организации.
     """
 
     name = models.CharField("название", max_length=120, unique=True)
@@ -69,14 +70,24 @@ class User(AbstractUser):
     role = models.CharField("роль", max_length=20, choices=Role.choices)
     full_name = models.CharField("ФИО", max_length=200, blank=True)
     phone = models.CharField("телефон", max_length=32, blank=True)
-    # ORG-SCOPE: организация пользователя.
+    # Организация пользователя (верхний уровень изоляции). Ставится при создании,
+    # из запроса не принимается. Nullable снимается миграцией 0004 после бэкфилла.
     organization = models.ForeignKey(
         Organization,
         verbose_name="организация",
         on_delete=models.PROTECT,
+        related_name="users",
+    )
+    # Владелец-координатор — второй уровень изоляции. Заполняется только для
+    # тьюторов (role=tutor): координатор, которому принадлежит тьютор. У остальных
+    # ролей и у тьюторов, созданных админом, — пусто (виден только админу орг-ии).
+    owner = models.ForeignKey(
+        "self",
+        verbose_name="владелец-координатор",
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="users",
+        related_name="owned_tutors",
     )
     # Заполняется только для role=parent: дети этого родителя.
     children = models.ManyToManyField(
@@ -196,14 +207,21 @@ class Student(models.Model):
         blank=True,
         related_name="created_students",
     )
-    # ORG-SCOPE
+    # Организация (верхний уровень изоляции). Nullable снимается миграцией 0004.
     organization = models.ForeignKey(
         Organization,
         verbose_name="организация",
         on_delete=models.PROTECT,
+        related_name="students",
+    )
+    # Владелец-координатор (второй уровень). Пусто → виден только админу орг-ии.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="владелец-координатор",
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="students",
+        related_name="owned_students",
     )
     created_at = models.DateTimeField("создан", auto_now_add=True)
 
@@ -219,15 +237,15 @@ class Student(models.Model):
 class Subject(models.Model):
     """Предмет: математика, английский и т.д. Управляется координатором."""
 
-    name = models.CharField("название", max_length=100, unique=True)
+    # Имя уникально В ПРЕДЕЛАХ организации (см. constraints), а не глобально —
+    # у CLA и RKS может быть свой предмет «Математика».
+    name = models.CharField("название", max_length=100)
     is_active = models.BooleanField("активен", default=True)
-    # ORG-SCOPE
+    # Организация (предметы шарятся внутри орг-ии, но не между орг-иями).
     organization = models.ForeignKey(
         Organization,
         verbose_name="организация",
         on_delete=models.PROTECT,
-        null=True,
-        blank=True,
         related_name="subjects",
     )
 
@@ -235,6 +253,11 @@ class Subject(models.Model):
         verbose_name = "предмет"
         verbose_name_plural = "предметы"
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name", "organization"], name="unique_subject_name_per_org"
+            )
+        ]
 
     def __str__(self):
         return self.name
@@ -263,14 +286,21 @@ class Group(models.Model):
     )
     start_date = models.DateField("дата начала", default=timezone.localdate)
     is_active = models.BooleanField("активна", default=True)
-    # ORG-SCOPE
+    # Организация (верхний уровень изоляции). Nullable снимается миграцией 0004.
     organization = models.ForeignKey(
         Organization,
         verbose_name="организация",
         on_delete=models.PROTECT,
+        related_name="groups",
+    )
+    # Владелец-координатор (второй уровень). Пусто → видна только админу орг-ии.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        verbose_name="владелец-координатор",
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="groups",
+        related_name="owned_groups",
     )
     created_at = models.DateTimeField("создана", auto_now_add=True)
 
@@ -449,6 +479,13 @@ class ScheduleEntry(models.Model):
         blank=True,
         related_name="created_schedule_entries",
     )
+    # Организация (совпадает с организацией группы). Nullable снимается миграцией 0004.
+    organization = models.ForeignKey(
+        Organization,
+        verbose_name="организация",
+        on_delete=models.PROTECT,
+        related_name="schedule_entries",
+    )
 
     class Meta:
         verbose_name = "занятие в расписании"
@@ -541,6 +578,13 @@ class Test(models.Model):
     )
     date = models.DateField("дата", default=timezone.localdate)
     max_score = models.PositiveSmallIntegerField("максимальный балл", default=GRADE_MAX)
+    # Организация (совпадает с организацией группы/предмета). Nullable снимается 0004.
+    organization = models.ForeignKey(
+        Organization,
+        verbose_name="организация",
+        on_delete=models.PROTECT,
+        related_name="tests",
+    )
 
     class Meta:
         verbose_name = "тест"
@@ -613,6 +657,14 @@ class Material(models.Model):
         related_name="materials",
     )
     grade = models.CharField("класс", max_length=10, blank=True)
+    # Организация: материалы шарятся внутри орг-ии программно (не по координаторам),
+    # но между орг-иями изолированы. Nullable снимается миграцией 0004.
+    organization = models.ForeignKey(
+        Organization,
+        verbose_name="организация",
+        on_delete=models.PROTECT,
+        related_name="materials",
+    )
     created_at = models.DateTimeField("создан", auto_now_add=True)
 
     class Meta:
